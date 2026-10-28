@@ -10,14 +10,31 @@ Vibecoded with ChatGPT with manual review and tweaks.
 from __future__ import annotations
 
 import queue
-import subprocess
-import sys
 import threading
+from contextlib import redirect_stderr, redirect_stdout
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import layoutcopy as transfer
+
+
+class _QueueWriter:
+    """Redirect print output from the worker thread into the GUI log."""
+
+    def __init__(self, messages: queue.Queue[tuple[str, object]]) -> None:
+        self.messages = messages
+
+    def write(self, text: str) -> int:
+        if text:
+            self.messages.put(("log", text))
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
 
 
 class LayoutTransferGUI(tk.Tk):
@@ -144,73 +161,80 @@ class LayoutTransferGUI(tk.Tk):
     def _run(self) -> None:
         if self.running:
             return
-        root = self.root_path.get().strip()
-        manifest = self.manifest_path.get().strip()
-        if not root or not Path(root).expanduser().is_dir():
+
+        root_input = self.root_path.get().strip()
+        manifest_input = self.manifest_path.get().strip()
+        root_path = Path(root_input).expanduser() if root_input else None
+        manifest_path = Path(manifest_input).expanduser() if manifest_input else None
+
+        if root_path is None or not root_path.is_dir():
             messagebox.showerror("Invalid root directory", "Choose an existing root directory.", parent=self)
             return
-        if not manifest:
+        if manifest_path is None:
             messagebox.showerror("Missing manifest", "Choose a manifest file path.", parent=self)
             return
 
-        command = [sys.executable, "-u", str(Path(__file__).with_name("layoutcopy.py"))]
-        if self.mode.get() == "Export manifest":
-            if Path(manifest).expanduser().exists() and not messagebox.askyesno(
-                "Overwrite manifest?", f"This file already exists:\n{manifest}\n\nOverwrite it?", parent=self
+        mode = self.mode.get()
+        execute = mode == "Apply manifest" and self.execute_changes.get()
+        if mode == "Export manifest":
+            if manifest_path.exists() and not messagebox.askyesno(
+                "Overwrite manifest?",
+                f"This file already exists:\n{manifest_path}\n\nOverwrite it?",
+                parent=self,
             ):
                 return
-            command.extend(["export", root, manifest, "--hash-algorithm", self.hash_algorithm.get()])
-        else:
-            if not Path(manifest).expanduser().is_file():
-                messagebox.showerror("Invalid manifest", "Choose an existing manifest file.", parent=self)
+        elif not manifest_path.is_file():
+            messagebox.showerror("Invalid manifest", "Choose an existing manifest file.", parent=self)
+            return
+
+        if execute:
+            confirmed = messagebox.askyesno(
+                "Confirm reorganization",
+                "This will move files and replace the selected directory layout.\n\n"
+                "The program verifies the complete file set first, but an I/O failure can still occur.\n\n"
+                "Proceed with moving files?",
+                icon="warning",
+                parent=self,
+            )
+            if not confirmed:
                 return
-            command.extend(["apply", root, manifest])
-            if self.execute_changes.get():
-                confirmed = messagebox.askyesno(
-                    "Confirm reorganization",
-                    "This will move files and replace the selected directory layout.\n\n"
-                    "The program verifies the complete file set first, but an I/O failure can still occur.\n\n"
-                    "Proceed with moving files?",
-                    icon="warning",
-                    parent=self,
-                )
-                if not confirmed:
-                    return
-                command.append("--execute")
+
+        root = str(root_path.resolve())
+        manifest = str(manifest_path.resolve())
+        algorithm = self.hash_algorithm.get()
+        self._append_log(f"\n--- {mode} ---\nRoot: {root}\nManifest: {manifest}\n")
+        if mode == "Export manifest":
+            self._append_log(f"Hash algorithm: {algorithm}\n")
+        elif execute:
+            self._append_log("Execution confirmed; files will be moved if validation succeeds.\n")
+        else:
+            self._append_log("Dry run; no files will be moved.\n")
 
         self._set_running(True)
-        self._append_log("$ " + subprocess.list2cmdline(command) + "\n")
         threading.Thread(
             target=self._worker,
-            args=(command, self.mode.get() == "Apply manifest" and self.execute_changes.get()),
+            args=(mode, root, manifest, algorithm, execute),
             daemon=True,
         ).start()
 
-    def _worker(self, command: list[str], approve_execute: bool) -> None:
+    def _worker(
+        self, mode: str, root: str, manifest: str, algorithm: str, execute: bool
+    ) -> None:
+        writer = _QueueWriter(self.messages)
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=str(Path(__file__).resolve().parent),
-                stdin=subprocess.PIPE if approve_execute else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-            )
-            if approve_execute and process.stdin is not None:
-                # The GUI has already shown and accepted an explicit confirmation dialog.
-                process.stdin.write("REORGANIZE\n")
-                process.stdin.close()
-            assert process.stdout is not None
-            for line in process.stdout:
-                self.messages.put(("log", line))
-            code = process.wait()
-            self.messages.put(("done", code))
+            # Call the imported module directly. In a PyInstaller build,
+            # sys.executable points to the GUI executable itself, so starting
+            # it as a child process would launch another copy of the GUI.
+            with redirect_stdout(writer), redirect_stderr(writer):
+                if mode == "Export manifest":
+                    transfer.export_manifest(root, manifest, algorithm)
+                else:
+                    # The GUI has already shown and received confirmation.
+                    transfer.apply_manifest(root, manifest, execute)
+            self.messages.put(("done", 0))
         except Exception as exc:
-            self.messages.put(("log", f"Failed to start operation: {exc}\n"))
-            self.messages.put(("done", -1))
+            self.messages.put(("log", f"ERROR: {exc}\n"))
+            self.messages.put(("done", 1))
 
     def _drain_messages(self) -> None:
         try:

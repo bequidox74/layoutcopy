@@ -225,7 +225,7 @@ def apply_manifest(root_arg: str, manifest_arg: str, execute: bool) -> None:
 
     print(f"Verified exact file match: {len(old_files):,} files.")
     print(f"Target layout: {len(target_dirs):,} directories, {len(target_files):,} files.")
-    print("No file contents will be copied over the network; files are moved locally on A.")
+    print("No file contents will be copied over the network; files are moved locally on source PC.")
     if not execute:
         print("DRY RUN: no changes made. Re-run with --execute to reorganize the tree.")
         for source, destination in plan[:10]:
