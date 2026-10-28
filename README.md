@@ -4,7 +4,10 @@ Vibecoded with ChatGPT and manually reviewied and tweaked.
 
 LICENSE: CC0 1.0 Universal / Public Domain
 
-## Usage
+## Usage (GUI)
+Run `layoutcopy-gui.exe`, choose the operation, paths, hashing algorithm, and run.
+
+## Usage (CLI)
 1. Ensure the files in both directories on both computers are the same.
 2. Run `layoutcopy.exe export path/to/src/dir path/to/manifest.json` on the source computer.
 3. Send the manifest JSON over to the destination computer.
